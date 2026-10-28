@@ -231,16 +231,18 @@ def main():
         return
 
     for acc in account_list:
-        u = acc.get("username") or acc.get("email") or ""
-        p = acc.get("password") or ""
-        if u and p:
-            print(f"\n================ 开始处理账户: {u} ================")
-            with SB(**sb_kwargs) as sb:
-                if login(sb, u, p):
-                    do_checkin(sb, u)
-                else:
-                    send_tg_message("❌", "登录失败", u)
-            time.sleep(3)
+        u = (acc.get("username") or acc.get("email") or "").strip()
+        p = (acc.get("password") or "").strip()
+        # 如果账号密码为空，或者包含中文占位提示词，直接跳过不执行
+        if not u or not p or "账号" in u or "密码" in p or "example.com" in u:
+            continue
+        print(f"\n================ 开始处理账户: {u} ================")
+        with SB(**sb_kwargs) as sb:
+            if login(sb, u, p):
+                do_checkin(sb, u)
+            else:
+                send_tg_message("❌", "登录失败", u)
+        time.sleep(3)
 
 if __name__ == "__main__":
     main()
