@@ -37,6 +37,7 @@ jobs:
 
     - name: 🚀 执行 9v4 每日签到
       env:
+        USERS_JSON: ${{ secrets.STORE9V4_USERS }}
         STORE9V4_EMAIL: ${{ secrets.STORE9V4_EMAIL }}
         STORE9V4_PASSWORD: ${{ secrets.STORE9V4_PASSWORD }}
         KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
