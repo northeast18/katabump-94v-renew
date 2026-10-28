@@ -1,0 +1,61 @@
+name: 9v4 Auto Daily Check-in
+
+on:
+  schedule:
+    # 每天北京时间早上 08:38 自动执行
+    - cron: '38 0 * * *'
+  workflow_dispatch: # 允许手动点击触发
+
+jobs:
+  Daily-Checkin:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: ⚙ 设置 Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: 🛠️ 安装环境与浏览器依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+        pip install seleniumbase requests
+        seleniumbase install chromedriver
+
+    - name: ⚙ 挂载代理 (如配置了节点)
+      continue-on-error: true
+      env:
+        NODE_LINK: ${{ secrets.NODE_LINK }}
+      run: |
+        bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+
+    - name: 🚀 执行 9v4 每日签到
+      env:
+        STORE9V4_EMAIL: ${{ secrets.STORE9V4_EMAIL }}
+        STORE9V4_PASSWORD: ${{ secrets.STORE9V4_PASSWORD }}
+        KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
+        KATABUMP_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: |
+        xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+          python3 9v4_app.py
+
+    - name: 🕒 保活与更新运行时间
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> time.txt
+        git add time.txt
+        if git diff --cached --quiet; then
+          echo "No changes"
+        else
+          git commit -m "⏱️ 9v4 Checkin Keep-Alive $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+          git push origin main
+        fi
