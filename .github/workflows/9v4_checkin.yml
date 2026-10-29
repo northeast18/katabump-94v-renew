@@ -3,7 +3,7 @@ name: 9v4 Auto Daily Check-in
 on:
   schedule:
     - cron: '30 22 * * *'  # 早班：北京时间 06:30 进队列（与 Katabump 错开 15 分钟）
-    - cron: '30 3 * * *'   # 午班双保险：北京时间 11:30（今天中午就能触发！）
+    - cron: '35 9 * * *'   # 午班双保险：北京时间 17:35
   workflow_dispatch: # 允许手动点击触发
 
 jobs:
