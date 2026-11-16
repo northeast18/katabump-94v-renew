@@ -9,7 +9,6 @@ from seleniumbase import SB
 
 BASE_URL = "https://1a2x.com"
 
-# 优先读取 1A2X 专属配置，未配置则自动复用已有的 KATABUMP 账号配置
 EMAIL = os.environ.get("FORUM_1A2X_EMAIL") or os.environ.get("KATABUMP_EMAIL") or ""
 PASSWORD = os.environ.get("FORUM_1A2X_PASSWORD") or os.environ.get("KATABUMP_PASSWORD") or ""
 USERS_JSON = os.environ.get("USERS_JSON") or ""
@@ -51,10 +50,14 @@ def handle_turnstile(sb) -> bool:
     print("🔍 检测并处理 Cloudflare Turnstile 人机验证...")
     _SOLVED_JS = """
     var el = document.querySelector('#password-login input[name="cf-turnstile-response"]') || document.querySelector('input[name="cf-turnstile-response"]');
-    return !!(el && el.value && el.value.length > 20);
+    var fb = document.querySelector('#password-login .turnstile-feedback');
+    var fb_ok = fb && (fb.innerText.includes('验证通过') || fb.innerText.includes('Verification complete'));
+    return !!((el && el.value && el.value.length > 20) || fb_ok);
     """
-    _EXPAND_JS = """
-    document.querySelectorAll('iframe').forEach(function(f){
+    _PREPARE_JS = """
+    var w = document.querySelector('#password-login .turnstile-widget');
+    if (w) w.scrollIntoView({block: 'center'});
+    document.querySelectorAll('#password-login iframe').forEach(function(f){
         if (f.src && f.src.includes('challenges.cloudflare.com')) {
             f.style.width = '300px'; f.style.height = '65px';
             f.style.visibility = 'visible'; f.style.opacity = '1';
@@ -68,7 +71,7 @@ def handle_turnstile(sb) -> bool:
 
     for attempt in range(6):
         try:
-            sb.execute_script(_EXPAND_JS)
+            sb.execute_script(_PREPARE_JS)
         except Exception:
             pass
         if sb.execute_script(_SOLVED_JS):
@@ -81,25 +84,28 @@ def handle_turnstile(sb) -> bool:
         except Exception as e:
             print(f"⚠️ 点击异常: {e}")
 
-        for _ in range(12):
+        for _ in range(14):
             time.sleep(0.5)
             if sb.execute_script(_SOLVED_JS):
                 print("✅ Turnstile 验证通过！")
                 return True
-    print("⚠️ Turnstile 未确认通过，尝试继续提交...")
+
+    fb_text = sb.execute_script("var fb = document.querySelector('#password-login .turnstile-feedback'); return fb ? fb.innerText : '';")
+    print(f"❌ Turnstile 6次均未通过 (页面提示: {fb_text})")
     return False
 
-def login(sb, email, password) -> bool:
+def login(sb, email, password) -> tuple[bool, str]:
     print(f"🌐 打开 1A2X 登录页面: {BASE_URL}/login")
     sb.uc_open_with_reconnect(f"{BASE_URL}/login", reconnect_time=8)
     time.sleep(5)
 
     print("⏳ 等待登录表单加载...")
     try:
-        sb.wait_for_element('#auth-identity, input[name="identity"]', timeout=25)
+        sb.wait_for_element('#auth-identity', timeout=25)
     except Exception:
-        print(f"❌ 页面未加载出输入框 (当前 URL: {sb.get_current_url()}, 标题: {sb.get_title()})")
-        return False
+        msg = f"页面未加载出输入框 (URL: {sb.get_current_url()}, 标题: {sb.get_title()})"
+        print(f"❌ {msg}")
+        return False, msg
 
     print("📧 填写账号与密码...")
     sb.click('#auth-identity')
@@ -110,36 +116,51 @@ def login(sb, email, password) -> bool:
     sb.type('#auth-password', password)
     time.sleep(1)
 
-    # 勾选记住登录（可选）
+    # 勾选记住登录
     try:
         sb.execute_script("var cb = document.getElementById('remember-login'); if(cb && !cb.checked) cb.click();")
     except Exception:
         pass
 
-    # 处理 Turnstile 验证
-    handle_turnstile(sb)
+    # 必须确认 Turnstile 通过后再提交
+    if not handle_turnstile(sb):
+        return False, "Cloudflare Turnstile 人机验证未通过"
     time.sleep(1)
 
-    print("🖱️ 点击登录按钮...")
+    print("🖱️ 点击登录按钮提交...")
     try:
         sb.click('#password-login button.primary.auth-submit')
     except Exception:
-        sb.press_keys('#auth-password', '\n')
+        sb.execute_script("document.querySelector('#password-login').submit();")
 
-    print("⏳ 等待登录跳转...")
-    for _ in range(20):
+    print("⏳ 等待登录跳转与身份确认...")
+    for _ in range(25):
         time.sleep(1)
-        cur_url = sb.get_current_url().split('?')[0].rstrip('/')
-        # 登录成功后会跳回首页或存在 .daily-checkin / 退出按钮
-        has_member = sb.execute_script("""
-            return !!(document.querySelector('.daily-checkin, .welcome-panel-member, a[href*="/u/"], form[action*="/logout"]'));
+        state = sb.execute_script("""
+            var url = window.location.href;
+            var err = document.querySelector('[data-auth-error], .alert.danger, .form-error, .auth-error');
+            var fb = document.querySelector('#password-login .turnstile-feedback');
+            var loggedIn = !url.includes('/login') && !!(
+                document.querySelector('.daily-checkin, .welcome-panel-member, form[action*="/logout"]')
+                && !document.querySelector('a.header-login')
+            );
+            return {
+                url: url,
+                loggedIn: loggedIn,
+                errText: err ? err.innerText.trim() : '',
+                fbText: fb ? fb.innerText.trim() : ''
+            };
         """)
-        if has_member or cur_url == BASE_URL:
-            print("✅ 登录成功！")
-            return True
+        if state.get("loggedIn"):
+            print(f"✅ 登录成功！当前页面: {state.get('url')}")
+            return True, ""
+        if state.get("errText"):
+            print(f"❌ 登录被拒绝，页面提示: {state.get('errText')}")
+            return False, state.get("errText")
 
-    print(f"❌ 登录未成功跳转，当前 URL: {sb.get_current_url()}")
-    return False
+    err_detail = f"未跳转离开登录页 (URL: {sb.get_current_url()})"
+    print(f"❌ {err_detail}")
+    return False, err_detail
 
 def get_member_info(sb) -> str:
     try:
@@ -160,11 +181,10 @@ def get_member_info(sb) -> str:
 
 def do_checkin(sb, email):
     print("🎁 正在首页查找每日签到区域 (.daily-checkin)...")
-    if sb.get_current_url().rstrip('/') != BASE_URL:
+    if '/login' in sb.get_current_url():
         sb.open(BASE_URL)
-    time.sleep(4)
+        time.sleep(4)
 
-    # 检查是否存在 .daily-checkin
     checkin_state = sb.execute_script("""
         var box = document.querySelector('.daily-checkin');
         if (!box) return { found: false };
@@ -190,7 +210,6 @@ def do_checkin(sb, email):
     btn_text = checkin_state.get("btn_text", "")
     hint_text = checkin_state.get("hint_text", "")
 
-    # 判断是否今日已经签过到
     if checkin_state.get("disabled") or "已签" in btn_text or "checked" in btn_text.lower():
         info = get_member_info(sb)
         detail = f"{btn_text} ({hint_text})".strip(" ()")
@@ -198,7 +217,6 @@ def do_checkin(sb, email):
         send_tg_message("⏳", "今日已签到", email, info, detail)
         return
 
-    # 执行点击签到
     print(f"🖱️ 点击签到按钮 ({btn_text})...")
     try:
         sb.click('.daily-checkin button, .daily-checkin .checkin-button')
@@ -208,7 +226,6 @@ def do_checkin(sb, email):
             if (btn) btn.click();
         """)
 
-    # 等待签到请求完成或页面刷新
     time.sleep(5)
 
     after_state = sb.execute_script("""
@@ -252,10 +269,11 @@ def main():
             continue
         print(f"\n================ 开始处理 1A2X 账户: {u} ================")
         with SB(**sb_kwargs) as sb:
-            if login(sb, u, p):
+            ok, err = login(sb, u, p)
+            if ok:
                 do_checkin(sb, u)
             else:
-                send_tg_message("❌", "登录失败", u)
+                send_tg_message("❌", "登录失败", u, detail=err)
         time.sleep(3)
 
 if __name__ == "__main__":
