@@ -64,20 +64,24 @@ def send_tg_message(status_icon, status_text, account_label, banana_info="未知
 def handle_turnstile(sb) -> bool:
     print("🔍 检测并处理 Cloudflare Turnstile 人机验证...")
     _SOLVED_JS = """
-    var el = document.querySelector('#password-login input[name="cf-turnstile-response"]') || document.querySelector('input[name="cf-turnstile-response"]');
-    var fb = document.querySelector('#password-login .turnstile-feedback');
-    var fb_ok = fb && (fb.innerText.includes('验证通过') || fb.innerText.includes('Verification complete'));
-    return !!((el && el.value && el.value.length > 20) || fb_ok);
+    (() => {
+        var el = document.querySelector('#password-login input[name="cf-turnstile-response"]') || document.querySelector('input[name="cf-turnstile-response"]');
+        var fb = document.querySelector('#password-login .turnstile-feedback');
+        var fb_ok = fb && (fb.innerText.includes('验证通过') || fb.innerText.includes('Verification complete'));
+        return !!((el && el.value && el.value.length > 20) || fb_ok);
+    })()
     """
     _PREPARE_JS = """
-    var w = document.querySelector('#password-login .turnstile-widget');
-    if (w) w.scrollIntoView({block: 'center'});
-    document.querySelectorAll('#password-login iframe').forEach(function(f){
-        if (f.src && f.src.includes('challenges.cloudflare.com')) {
-            f.style.width = '300px'; f.style.height = '65px';
-            f.style.visibility = 'visible'; f.style.opacity = '1';
-        }
-    });
+    (() => {
+        var w = document.querySelector('#password-login .turnstile-widget');
+        if (w) w.scrollIntoView({block: 'center'});
+        document.querySelectorAll('#password-login iframe').forEach(function(f){
+            if (f.src && f.src.includes('challenges.cloudflare.com')) {
+                f.style.width = '300px'; f.style.height = '65px';
+                f.style.visibility = 'visible'; f.style.opacity = '1';
+            }
+        });
+    })()
     """
     time.sleep(3)
     if sb.execute_script(_SOLVED_JS):
@@ -107,9 +111,11 @@ def handle_turnstile(sb) -> bool:
 
 def is_logged_in(sb) -> bool:
     return bool(sb.execute_script("""
+    (() => {
         var url = window.location.href;
         if (url.includes('/login')) return false;
         return !!(document.querySelector('.daily-checkin, .welcome-panel-member, form[action*="/logout"]') && !document.querySelector('a.header-login'));
+    })()
     """))
 
 def login_with_cookie(sb, cookie_str: str) -> bool:
@@ -117,15 +123,19 @@ def login_with_cookie(sb, cookie_str: str) -> bool:
     sb.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
     time.sleep(3)
 
+    added_count = 0
     for item in cookie_str.split(";"):
         if "=" in item:
             k, v = item.strip().split("=", 1)
-            if k.strip():
+            k, v = k.strip(), v.strip()
+            if k:
                 try:
-                    sb.driver.add_cookie({"name": k.strip(), "value": v.strip(), "domain": "1a2x.com", "path": "/"})
-                except Exception:
-                    pass
+                    sb.driver.add_cookie({"name": k, "value": v, "path": "/"})
+                    added_count += 1
+                except Exception as e:
+                    print(f"⚠️ 注入 Cookie [{k}] 失败: {e}")
 
+    print(f"🍪 共注入 {added_count} 条 Cookie，刷新页面验证登录态...")
     sb.open(BASE_URL)
     time.sleep(4)
     if is_logged_in(sb):
@@ -153,7 +163,7 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
     time.sleep(1)
 
     try:
-        sb.execute_script("var cb = document.getElementById('remember-login'); if(cb && !cb.checked) cb.click();")
+        sb.execute_script("(() => { var cb = document.getElementById('remember-login'); if(cb && !cb.checked) cb.click(); })()")
     except Exception:
         pass
 
@@ -165,7 +175,7 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
     try:
         sb.click('#password-login button.primary.auth-submit')
     except Exception:
-        sb.execute_script("document.querySelector('#password-login').submit();")
+        sb.execute_script("(() => { document.querySelector('#password-login').submit(); })()")
 
     print("⏳ 等待登录结果...")
     for _ in range(25):
@@ -178,6 +188,7 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
         if "/login/verify" in cur_url:
             print("🔐 触发二次安全验证页 (/login/verify)！")
             verify_info = sb.execute_script("""
+            (() => {
                 var h = document.querySelector('h1, h2, .auth-heading');
                 var p = document.querySelector('.auth-panel p, .hint');
                 var inp = document.querySelector('input[type="text"], input[type="number"], input[name="code"], input[name="otp"]');
@@ -186,6 +197,7 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
                     desc: p ? p.innerText.trim() : '',
                     input_name: inp ? inp.name : ''
                 };
+            })()
             """)
             print(f"📋 二次验证要求: {verify_info}")
 
@@ -203,9 +215,9 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
                         return True, ""
                 return False, "TOTP 验证码提交后未成功登录"
             else:
-                return False, f"触发二次验证 ({verify_info.get('title')} - {verify_info.get('desc')})，建议改用 Cookie 登录或配置 TOTP 密钥"
+                return False, f"触发二次验证 ({verify_info.get('title')} - {verify_info.get('desc')})，建议更新 Cookie 或配置 TOTP 密钥"
 
-        err_text = sb.execute_script("var e = document.querySelector('[data-auth-error], .alert.danger, .form-error'); return e ? e.innerText.trim() : '';")
+        err_text = sb.execute_script("(() => { var e = document.querySelector('[data-auth-error], .alert.danger, .form-error'); return e ? e.innerText.trim() : ''; })()")
         if err_text:
             return False, err_text
 
@@ -214,6 +226,7 @@ def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
 def get_member_info(sb) -> str:
     try:
         info = sb.execute_script("""
+        (() => {
             var panel = document.querySelector('.welcome-panel-member') || document.body;
             var txt = panel.innerText || '';
             var m = txt.match(/(\\d+\\s*香蕉|香蕉\\s*[:：]?\\s*\\d+)/i);
@@ -221,6 +234,7 @@ def get_member_info(sb) -> str:
             var dc = document.querySelector('.daily-checkin');
             if (dc) return dc.innerText.replace(/\\s+/g, ' ').trim();
             return '已登录';
+        })()
         """)
         if info:
             return info.strip()
@@ -235,6 +249,7 @@ def do_checkin(sb, label):
         time.sleep(4)
 
     checkin_state = sb.execute_script("""
+    (() => {
         var box = document.querySelector('.daily-checkin');
         if (!box) return { found: false };
         var btn = box.querySelector('button, .checkin-button, a.button');
@@ -247,6 +262,7 @@ def do_checkin(sb, label):
             btn_text: (btn.innerText || '').trim(),
             hint_text: hint ? (hint.innerText || '').trim() : ''
         };
+    })()
     """)
     print(f"📋 签到组件状态: {checkin_state}")
 
@@ -268,16 +284,18 @@ def do_checkin(sb, label):
     try:
         sb.click('.daily-checkin button, .daily-checkin .checkin-button')
     except Exception:
-        sb.execute_script("var btn = document.querySelector('.daily-checkin button, .daily-checkin .checkin-button'); if (btn) btn.click();")
+        sb.execute_script("(() => { var btn = document.querySelector('.daily-checkin button, .daily-checkin .checkin-button'); if (btn) btn.click(); })()")
 
     time.sleep(5)
     after_state = sb.execute_script("""
+    (() => {
         var box = document.querySelector('.daily-checkin');
         var flash = document.querySelector('.flash, .notice, .toast, [role="alert"], [role="status"]');
         return {
             box_text: box ? box.innerText.replace(/\\s+/g, ' ').trim() : '',
             flash_text: flash ? flash.innerText.replace(/\\s+/g, ' ').trim() : ''
         };
+    })()
     """)
     info = get_member_info(sb)
     detail = (after_state.get("flash_text") or after_state.get("box_text") or "已完成签到点击").strip()
@@ -291,7 +309,6 @@ def main():
     if IS_PROXY:
         sb_kwargs["proxy"] = proxy_str
 
-    # 如果配置了单账号 Cookie，优先直接 Cookie 签到
     if COOKIE_STR.strip() and not USERS_JSON.strip():
         with SB(**sb_kwargs) as sb:
             if login_with_cookie(sb, COOKIE_STR):
