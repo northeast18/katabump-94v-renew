@@ -39,6 +39,8 @@ jobs:
         USERS_JSON: ${{ secrets.FORUM_1A2X_USERS }}
         FORUM_1A2X_EMAIL: ${{ secrets.FORUM_1A2X_EMAIL }}
         FORUM_1A2X_PASSWORD: ${{ secrets.FORUM_1A2X_PASSWORD }}
+        FORUM_1A2X_COOKIE: ${{ secrets.FORUM_1A2X_COOKIE }}
+        FORUM_1A2X_TOTP: ${{ secrets.FORUM_1A2X_TOTP }}
         KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
         KATABUMP_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
