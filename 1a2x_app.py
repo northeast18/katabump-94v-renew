@@ -4,6 +4,10 @@
 import os
 import json
 import time
+import hmac
+import base64
+import struct
+import hashlib
 import requests
 from seleniumbase import SB
 
@@ -11,11 +15,22 @@ BASE_URL = "https://1a2x.com"
 
 EMAIL = os.environ.get("FORUM_1A2X_EMAIL") or os.environ.get("KATABUMP_EMAIL") or ""
 PASSWORD = os.environ.get("FORUM_1A2X_PASSWORD") or os.environ.get("KATABUMP_PASSWORD") or ""
+COOKIE_STR = os.environ.get("FORUM_1A2X_COOKIE") or ""
+TOTP_SECRET = os.environ.get("FORUM_1A2X_TOTP") or ""
 USERS_JSON = os.environ.get("USERS_JSON") or ""
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 
-def send_tg_message(status_icon, status_text, email, banana_info="未知", detail=""):
+def generate_totp(secret: str) -> str:
+    key = base64.b32decode(secret.strip().replace(" ", "").upper() + "=" * ((8 - len(secret.strip()) % 8) % 8))
+    counter = int(time.time()) // 30
+    msg = struct.pack(">Q", counter)
+    digest = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1000000
+    return f"{code:06d}"
+
+def send_tg_message(status_icon, status_text, account_label, banana_info="未知", detail=""):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过推送。")
         return
@@ -23,16 +38,16 @@ def send_tg_message(status_icon, status_text, email, banana_info="未知", detai
     local_time = time.gmtime(time.time() + 8 * 3600)
     current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
 
-    if '@' in email:
-        name, domain = email.split('@', 1)
-        masked_email = f"{name[:2]}****{name[-2:]}@{domain}" if len(name) > 4 else f"{name}@{domain}"
+    if '@' in account_label:
+        name, domain = account_label.split('@', 1)
+        masked = f"{name[:2]}****{name[-2:]}@{domain}" if len(name) > 4 else f"{name}@{domain}"
     else:
-        masked_email = email[:2] + '****'
+        masked = account_label
 
     text = (
         f"🍌 1A2X 社区每日签到通知\n\n"
         f"{status_icon} {status_text}\n"
-        f"👤 签到账户: {masked_email}\n"
+        f"👤 签到账户: {masked}\n"
         f"🍌 香蕉状态: {banana_info}\n"
         f"⏱️ 执行时间: {current_time_str}"
     )
@@ -75,54 +90,73 @@ def handle_turnstile(sb) -> bool:
         except Exception:
             pass
         if sb.execute_script(_SOLVED_JS):
-            print(f"✅ Turnstile 通过（第 {attempt} 次）")
             return True
 
         print(f"🖱️ 第 {attempt + 1} 次尝试点击 Turnstile 验证框...")
         try:
             sb.uc_gui_click_captcha()
-        except Exception as e:
-            print(f"⚠️ 点击异常: {e}")
+        except Exception:
+            pass
 
         for _ in range(14):
             time.sleep(0.5)
             if sb.execute_script(_SOLVED_JS):
                 print("✅ Turnstile 验证通过！")
                 return True
-
-    fb_text = sb.execute_script("var fb = document.querySelector('#password-login .turnstile-feedback'); return fb ? fb.innerText : '';")
-    print(f"❌ Turnstile 6次均未通过 (页面提示: {fb_text})")
     return False
 
-def login(sb, email, password) -> tuple[bool, str]:
+def is_logged_in(sb) -> bool:
+    return bool(sb.execute_script("""
+        var url = window.location.href;
+        if (url.includes('/login')) return false;
+        return !!(document.querySelector('.daily-checkin, .welcome-panel-member, form[action*="/logout"]') && !document.querySelector('a.header-login'));
+    """))
+
+def login_with_cookie(sb, cookie_str: str) -> bool:
+    print("🍪 检测到 Cookie 配置，尝试免密直登...")
+    sb.uc_open_with_reconnect(BASE_URL, reconnect_time=5)
+    time.sleep(3)
+
+    for item in cookie_str.split(";"):
+        if "=" in item:
+            k, v = item.strip().split("=", 1)
+            if k.strip():
+                try:
+                    sb.driver.add_cookie({"name": k.strip(), "value": v.strip(), "domain": "1a2x.com", "path": "/"})
+                except Exception:
+                    pass
+
+    sb.open(BASE_URL)
+    time.sleep(4)
+    if is_logged_in(sb):
+        print("✅ Cookie 免密登录成功！")
+        return True
+    print("⚠️ Cookie 已失效或无效，回退至账号密码登录...")
+    return False
+
+def login(sb, email, password, totp_secret="") -> tuple[bool, str]:
     print(f"🌐 打开 1A2X 登录页面: {BASE_URL}/login")
     sb.uc_open_with_reconnect(f"{BASE_URL}/login", reconnect_time=8)
     time.sleep(5)
 
-    print("⏳ 等待登录表单加载...")
     try:
         sb.wait_for_element('#auth-identity', timeout=25)
     except Exception:
-        msg = f"页面未加载出输入框 (URL: {sb.get_current_url()}, 标题: {sb.get_title()})"
-        print(f"❌ {msg}")
-        return False, msg
+        return False, f"页面未加载出输入框 (URL: {sb.get_current_url()})"
 
     print("📧 填写账号与密码...")
     sb.click('#auth-identity')
     sb.type('#auth-identity', email)
     time.sleep(1)
-
     sb.click('#auth-password')
     sb.type('#auth-password', password)
     time.sleep(1)
 
-    # 勾选记住登录
     try:
         sb.execute_script("var cb = document.getElementById('remember-login'); if(cb && !cb.checked) cb.click();")
     except Exception:
         pass
 
-    # 必须确认 Turnstile 通过后再提交
     if not handle_turnstile(sb):
         return False, "Cloudflare Turnstile 人机验证未通过"
     time.sleep(1)
@@ -133,34 +167,49 @@ def login(sb, email, password) -> tuple[bool, str]:
     except Exception:
         sb.execute_script("document.querySelector('#password-login').submit();")
 
-    print("⏳ 等待登录跳转与身份确认...")
+    print("⏳ 等待登录结果...")
     for _ in range(25):
         time.sleep(1)
-        state = sb.execute_script("""
-            var url = window.location.href;
-            var err = document.querySelector('[data-auth-error], .alert.danger, .form-error, .auth-error');
-            var fb = document.querySelector('#password-login .turnstile-feedback');
-            var loggedIn = !url.includes('/login') && !!(
-                document.querySelector('.daily-checkin, .welcome-panel-member, form[action*="/logout"]')
-                && !document.querySelector('a.header-login')
-            );
-            return {
-                url: url,
-                loggedIn: loggedIn,
-                errText: err ? err.innerText.trim() : '',
-                fbText: fb ? fb.innerText.trim() : ''
-            };
-        """)
-        if state.get("loggedIn"):
-            print(f"✅ 登录成功！当前页面: {state.get('url')}")
+        if is_logged_in(sb):
+            print("✅ 登录成功！")
             return True, ""
-        if state.get("errText"):
-            print(f"❌ 登录被拒绝，页面提示: {state.get('errText')}")
-            return False, state.get("errText")
 
-    err_detail = f"未跳转离开登录页 (URL: {sb.get_current_url()})"
-    print(f"❌ {err_detail}")
-    return False, err_detail
+        cur_url = sb.get_current_url()
+        if "/login/verify" in cur_url:
+            print("🔐 触发二次安全验证页 (/login/verify)！")
+            verify_info = sb.execute_script("""
+                var h = document.querySelector('h1, h2, .auth-heading');
+                var p = document.querySelector('.auth-panel p, .hint');
+                var inp = document.querySelector('input[type="text"], input[type="number"], input[name="code"], input[name="otp"]');
+                return {
+                    title: h ? h.innerText.trim() : '',
+                    desc: p ? p.innerText.trim() : '',
+                    input_name: inp ? inp.name : ''
+                };
+            """)
+            print(f"📋 二次验证要求: {verify_info}")
+
+            if totp_secret and verify_info.get("input_name"):
+                code = generate_totp(totp_secret)
+                print(f"🔑 使用 TOTP 密钥自动填入验证码: {code}")
+                inp_sel = f'input[name="{verify_info["input_name"]}"]'
+                sb.type(inp_sel, code)
+                time.sleep(1)
+                sb.click('button[type="submit"], button.primary.auth-submit')
+                for _ in range(15):
+                    time.sleep(1)
+                    if is_logged_in(sb):
+                        print("✅ 二次验证通过，登录成功！")
+                        return True, ""
+                return False, "TOTP 验证码提交后未成功登录"
+            else:
+                return False, f"触发二次验证 ({verify_info.get('title')} - {verify_info.get('desc')})，建议改用 Cookie 登录或配置 TOTP 密钥"
+
+        err_text = sb.execute_script("var e = document.querySelector('[data-auth-error], .alert.danger, .form-error'); return e ? e.innerText.trim() : '';")
+        if err_text:
+            return False, err_text
+
+    return False, f"未跳转离开登录页 (URL: {sb.get_current_url()})"
 
 def get_member_info(sb) -> str:
     try:
@@ -179,9 +228,9 @@ def get_member_info(sb) -> str:
         pass
     return "未知"
 
-def do_checkin(sb, email):
+def do_checkin(sb, label):
     print("🎁 正在首页查找每日签到区域 (.daily-checkin)...")
-    if '/login' in sb.get_current_url():
+    if sb.get_current_url().rstrip('/') != BASE_URL:
         sb.open(BASE_URL)
         time.sleep(4)
 
@@ -202,9 +251,7 @@ def do_checkin(sb, email):
     print(f"📋 签到组件状态: {checkin_state}")
 
     if not checkin_state or not checkin_state.get("found"):
-        info = get_member_info(sb)
-        print("⚠️ 页面未找到 .daily-checkin 区域")
-        send_tg_message("⚠️", "未找到签到按钮", email, info)
+        send_tg_message("⚠️", "未找到签到按钮", label, get_member_info(sb))
         return
 
     btn_text = checkin_state.get("btn_text", "")
@@ -214,20 +261,16 @@ def do_checkin(sb, email):
         info = get_member_info(sb)
         detail = f"{btn_text} ({hint_text})".strip(" ()")
         print(f"⏳ 今日已签到: {detail}")
-        send_tg_message("⏳", "今日已签到", email, info, detail)
+        send_tg_message("⏳", "今日已签到", label, info, detail)
         return
 
     print(f"🖱️ 点击签到按钮 ({btn_text})...")
     try:
         sb.click('.daily-checkin button, .daily-checkin .checkin-button')
     except Exception:
-        sb.execute_script("""
-            var btn = document.querySelector('.daily-checkin button, .daily-checkin .checkin-button');
-            if (btn) btn.click();
-        """)
+        sb.execute_script("var btn = document.querySelector('.daily-checkin button, .daily-checkin .checkin-button'); if (btn) btn.click();")
 
     time.sleep(5)
-
     after_state = sb.execute_script("""
         var box = document.querySelector('.daily-checkin');
         var flash = document.querySelector('.flash, .notice, .toast, [role="alert"], [role="status"]');
@@ -239,7 +282,7 @@ def do_checkin(sb, email):
     info = get_member_info(sb)
     detail = (after_state.get("flash_text") or after_state.get("box_text") or "已完成签到点击").strip()
     print(f"✅ 签到完成！状态: {info} | 详情: {detail}")
-    send_tg_message("🎉", "签到成功", email, info, detail)
+    send_tg_message("🎉", "签到成功", label, info, detail)
 
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
@@ -247,6 +290,20 @@ def main():
     sb_kwargs = {"uc": True, "headless": False}
     if IS_PROXY:
         sb_kwargs["proxy"] = proxy_str
+
+    # 如果配置了单账号 Cookie，优先直接 Cookie 签到
+    if COOKIE_STR.strip() and not USERS_JSON.strip():
+        with SB(**sb_kwargs) as sb:
+            if login_with_cookie(sb, COOKIE_STR):
+                do_checkin(sb, EMAIL or "Cookie用户")
+                return
+            elif EMAIL and PASSWORD:
+                ok, err = login(sb, EMAIL, PASSWORD, TOTP_SECRET)
+                if ok:
+                    do_checkin(sb, EMAIL)
+                else:
+                    send_tg_message("❌", "登录失败", EMAIL, detail=err)
+                return
 
     account_list = []
     if USERS_JSON.strip():
@@ -256,24 +313,35 @@ def main():
             pass
 
     if not account_list and EMAIL and PASSWORD:
-        account_list = [{"username": EMAIL, "password": PASSWORD}]
+        account_list = [{"username": EMAIL, "password": PASSWORD, "totp": TOTP_SECRET}]
 
     if not account_list:
-        print("❌ 未配置账号密码！")
+        print("❌ 未配置账号密码或 Cookie！")
         return
 
     for acc in account_list:
         u = (acc.get("username") or acc.get("email") or "").strip()
         p = (acc.get("password") or "").strip()
-        if not u or not p or "账号" in u or "密码" in p or "example.com" in u:
+        c = (acc.get("cookie") or "").strip()
+        t = (acc.get("totp") or "").strip()
+        if (not u or not p) and not c:
             continue
-        print(f"\n================ 开始处理 1A2X 账户: {u} ================")
+        if "账号" in u or "example.com" in u:
+            continue
+
+        print(f"\n================ 开始处理 1A2X 账户: {u or 'Cookie用户'} ================")
         with SB(**sb_kwargs) as sb:
-            ok, err = login(sb, u, p)
-            if ok:
-                do_checkin(sb, u)
+            logged = False
+            err = ""
+            if c:
+                logged = login_with_cookie(sb, c)
+            if not logged and u and p:
+                logged, err = login(sb, u, p, t)
+
+            if logged:
+                do_checkin(sb, u or "Cookie用户")
             else:
-                send_tg_message("❌", "登录失败", u, detail=err)
+                send_tg_message("❌", "登录失败", u or "Cookie用户", detail=err)
         time.sleep(3)
 
 if __name__ == "__main__":
